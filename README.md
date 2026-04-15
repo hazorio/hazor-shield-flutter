@@ -1,6 +1,16 @@
-# Hazor Shield Flutter SDK
+# Hazor Shield — Flutter SDK
 
-Bot defense for Flutter apps — verify users with proof-of-work, device attestation (Play Integrity / DeviceCheck), and behavioral signals.
+Bot defense for Flutter apps. Verifies users with proof-of-work, device
+attestation (Play Integrity on Android, App Attest on iOS) and
+behavioral signals collected by a Rust native core.
+
+- iOS 14+ App Attest with DeviceCheck fallback
+- Android Play Integrity **Standard API** (warm token) with Classic
+  fallback
+- Persistent Challenge Token cache (~1h, Keychain / EncryptedSharedPreferences)
+- Drop-in `http.Client` wrapper and Dio interceptor
+- Server-issued signed attestation nonce
+- Graceful degradation when the native core isn't linked
 
 ## Install
 
@@ -13,77 +23,117 @@ dependencies:
 
 ```dart
 import 'package:hazor_shield/hazor_shield.dart';
+import 'package:http/http.dart' as http;
 
-final shield = HazorShield(siteKey: 'hzs_live_abc123');
+final shield = HazorShield(siteKey: 'hzs_live_...');
+final client = ShieldHttpClient(inner: http.Client(), shield: shield);
 
-// Before a sensitive action (login, signup, checkout):
-try {
-  final result = await shield.verify();
-  // Send result.cd to your backend
-  await api.login(username, password, shieldCd: result.cd);
-} on ShieldException catch (e) {
-  print('Shield verification failed: $e');
-  // Fail closed — reject the action
-}
+final resp = await client.post(
+  Uri.parse('https://api.example.com/login'),
+  body: {'user': 'alice'},
+);
+```
+
+Manual flow:
+
+```dart
+final result = await shield.getCd();
+final resp = await http.post(url, headers: {kShieldCdHeader: result.cd});
 ```
 
 ## How it works
 
-1. **Signal collection** — The Rust native core (via FFI) collects device signals: OS, hardware, network, jailbreak/root detection
-2. **Challenge** — `POST /api/v1/protect/init` gets a PoW challenge from the server
-3. **Proof-of-work** — The SDK solves a SHA-256 PoW challenge (native Rust or Dart fallback)
-4. **Device attestation** — Requests a Play Integrity (Android) or DeviceCheck (iOS) token
-5. **Verification** — Submits signals + PoW + attestation to the server
-6. **Clearance decision** — Returns a `cd` token your backend validates via the server-side SDK
-
-## API
-
-### `HazorShield`
-
-```dart
-HazorShield({
-  required String siteKey,     // From the Hazor dashboard
-  String baseUrl,              // Default: https://protect.hazor.io
-  Duration timeout,            // Default: 10 seconds
-})
-```
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `verify()` | `Future<VerifyResult>` | Full verification flow (init → PoW → attest → verify → refresh) |
-| `collectSignals()` | `List<Signal>` | Raw device signals (for debugging) |
-| `version` | `String` | Native core version |
-| `dispose()` | `void` | Release HTTP client resources |
-
-### `VerifyResult`
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `cd` | `String` | Clearance decision — pass to your backend |
-| `sessionId` | `String` | Server session id (for debugging) |
+1. **`init`** → server returns session id, PoW challenge, and a signed
+   attestation nonce.
+2. **Proof-of-work** → SDK finds a nonce whose
+   `SHA-256(challenge || nonce)` has N leading hex zeros. Rust native
+   core if linked; pure Dart fallback otherwise.
+3. **Attestation** → Play Integrity (Android) or App Attest (iOS),
+   bound to the server nonce.
+4. **`verify`** → returns a Challenge Token (CT). Cached ~1h in
+   Keychain / EncryptedSharedPreferences.
+5. **`refresh`** → exchanges the CT for a single-use, 30-second
+   Clearance Decision. Every backend call gets a fresh one.
 
 ## Platform setup
 
 ### Android
 
-Add Play Integrity dependency (already included in the plugin):
+In `android/app/src/main/AndroidManifest.xml`:
 
-```groovy
-// No extra setup needed — the plugin handles this.
+```xml
+<application>
+    <meta-data
+        android:name="io.hazor.shield.cloudProjectNumber"
+        android:value="YOUR_PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER" />
+</application>
 ```
+
+Without it, Play Integrity falls back to Classic API (higher latency
+per token, no warm-token optimization).
 
 ### iOS
 
-DeviceCheck requires iOS 15+ and a real device (not simulator).
+Enable the **App Attest** capability on your target in Xcode. Minimum
+deployment target: iOS 15. Real devices only — simulator uses the
+DeviceCheck legacy path.
 
-## Native binary (optional)
+## Native core (optional, recommended)
 
-For maximum performance and anti-tampering, include the Rust native library from [hazor-shield-mobile-rs](https://github.com/hazorio/hazor-shield-mobile-rs):
+```bash
+git clone https://github.com/hazorio/hazor-shield-mobile-rs
+cd hazor-shield-mobile-rs
+make flutter-install-android   # populates android/src/main/jniLibs
+make flutter-install-ios       # produces ios/Frameworks/ShieldMobile.xcframework
+```
 
-- **Android**: Copy `.so` files to `android/src/main/jniLibs/`
-- **iOS**: Link `libshield_mobile_ios.a` in your Xcode project
+Prebuilt artifacts are attached to every tagged release of
+`hazor-shield-mobile-rs`.
 
-The SDK works without the native binary — it falls back to Dart implementations for PoW and skips native signal collection.
+## API
+
+| Method | Description |
+|---|---|
+| `HazorShield({required siteKey, baseUrl, timeout, httpClient, ctStore})` | Construct |
+| `Future<VerifyResult> getCd()` | Fresh CD, reuses cached CT when possible |
+| `Future<VerifyResult> verify()` | Force full round-trip, overwrite cache |
+| `Future<void> invalidate()` | Drop cached CT |
+| `List<Signal> collectSignals()` | Raw signals from native core |
+| `String get version` | Native core version or `'unknown'` |
+| `void dispose()` | Release HTTP client |
+
+`VerifyResult` — `cd`, `sessionId`, `expiresAt`.
+
+`ShieldHttpClient({required inner, required shield, skipHosts, skip})` —
+injects `X-Hazor-Shield-CD`, retries once on `401 WWW-Authenticate:
+Hazor-Shield`, skips `protect.hazor.io` and `/api/v1/protect/*`
+automatically.
+
+## Errors
+
+All failures throw `ShieldException` (`message`, optional `code`,
+`statusCode`). Common server codes:
+
+| code | meaning |
+|---|---|
+| `invalid_site_key` | Site not provisioned or disabled |
+| `rate_limited` | Too many /init calls from the IP |
+| `hash_mismatch` | PoW solution incorrect |
+| `difficulty_not_met` | PoW didn't satisfy difficulty |
+| `invalid_attestation_nonce` | Tampered/expired server nonce |
+| `invalid_ct` | CT signature failed or site secret rotated |
+
+## Troubleshooting
+
+- **`collectSignals()` returns `[]`** — native core isn't linked.
+  Install from `hazor-shield-mobile-rs`.
+- **Play Integrity errors on emulator** — expected. Server scores
+  empty tokens as "no attestation".
+- **App Attest fails in simulator** — expected; uses DeviceCheck
+  fallback. Real device for full security.
+- **401 with `Hazor-Shield` realm** — cached CT was invalidated
+  server-side. `ShieldHttpClient` retries automatically; manual users
+  call `invalidate()` + `getCd()`.
 
 ## License
 

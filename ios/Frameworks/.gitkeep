@@ -1,0 +1,3 @@
+Placeholder. `ShieldMobile.xcframework` is copied here by
+`make -C ../hazor-shield-mobile-rs flutter-install-ios`
+or downloaded from the shield-mobile-rs release artifacts.

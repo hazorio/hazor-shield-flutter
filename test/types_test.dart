@@ -55,10 +55,27 @@ void main() {
   });
 
   group('VerifyResult', () {
-    test('holds cd and sessionId', () {
-      final result = VerifyResult(cd: 'cd-123', sessionId: 'sess-456');
+    test('holds cd, sessionId and expiresAt', () {
+      final result = VerifyResult(
+        cd: 'cd-123',
+        sessionId: 'sess-456',
+        expiresAt: DateTime.utc(2030),
+      );
       expect(result.cd, 'cd-123');
       expect(result.sessionId, 'sess-456');
+      expect(result.expiresAt, DateTime.utc(2030));
+    });
+  });
+
+  group('header constants', () {
+    test('kShieldCdHeader matches server SDK contract', () {
+      // Validated against hazor-shield-sdk-python/django.py and
+      // hazor-shield-sdk-node middleware (both read X-Hazor-Shield-CD).
+      expect(kShieldCdHeader, 'X-Hazor-Shield-CD');
+    });
+
+    test('kShieldSiteKeyHeader matches /protect/* contract', () {
+      expect(kShieldSiteKeyHeader, 'X-Hazor-Shield-Site-Key');
     });
   });
 }

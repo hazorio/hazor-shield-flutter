@@ -1,0 +1,3 @@
+Placeholder. Native .so files are copied here by
+`make -C ../hazor-shield-mobile-rs flutter-install-android`
+or downloaded from the shield-mobile-rs release artifacts.

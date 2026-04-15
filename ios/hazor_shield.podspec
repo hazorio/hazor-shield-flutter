@@ -10,4 +10,15 @@ Pod::Spec.new do |s|
   s.dependency 'Flutter'
   s.platform         = :ios, '15.0'
   s.swift_version    = '5.0'
+
+  # Native Rust core from hazor-shield-mobile-rs. Vendored as an
+  # XCFramework so the same SDK works on device + simulator slices.
+  # Build it with `make -C ../hazor-shield-mobile-rs flutter-install-ios`
+  # — that target copies the XCFramework to Frameworks/.
+  if File.directory?(File.join(__dir__, 'Frameworks', 'ShieldMobile.xcframework'))
+    s.vendored_frameworks = 'Frameworks/ShieldMobile.xcframework'
+  end
+
+  # Link CommonCrypto + DeviceCheck (App Attest lives in DeviceCheck.framework).
+  s.frameworks = 'DeviceCheck', 'Security'
 end
